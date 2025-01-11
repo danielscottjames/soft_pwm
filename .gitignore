@@ -5,3 +5,4 @@ Module.symvers
 *.mod.c
 *.o
 .tmp_versions
+.cache/*

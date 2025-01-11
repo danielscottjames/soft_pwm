@@ -1,17 +1,8 @@
-CROSS_COMPILE=arm-linux-gnueabi-
-
-ifneq ($(KERNELRELEASE),)
 obj-m       := soft_pwm.o
 
-else
-PWD  := $(shell pwd)
-KDIR ?= $(PWD)/../linux-2.6.38/
+KVERSION= 5.15.93-sunxi
 
-modules:
-	$(MAKE) -C $(KDIR) SUBDIRS=$(PWD) modules
+all:
+	make -C /lib/modules/$(KVERSION)/build M=$(PWD) modules
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions modules.order Module.symvers
-
-.PHONY: modules clean
-
-endif
+	make -C /lib/modules/$(KVERSION)/build M=$(PWD) clean

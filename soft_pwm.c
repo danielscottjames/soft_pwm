@@ -81,18 +81,62 @@ static ssize_t pwm_show(struct device *dev, struct device_attribute *attr, char 
   return status;
 }
 
+ktime_t tick( void ) {
+  unsigned gpio;
+  struct pwm_desc *desc;
+  ktime_t now = ktime_get();
+  ktime_t next_tick = ktime_set(0,0);
+
+  for(gpio=0;gpio<ARCH_NR_GPIOS;gpio++){
+    desc = &pwm_table[gpio];
+    if(
+      test_bit(FLAG_SOFTPWM,&desc->flags) &&
+      (desc->period>0) &&
+      (desc->pulse>0) &&
+      (desc->pulse<=desc->period) &&
+      (desc->pulses!=0)
+    ){
+      if(desc->next_tick<=now){
+        desc->value = 1-desc->value;
+        __gpio_set_value(gpio,desc->value);
+        desc->counter++;
+        if(desc->pulses>0){ desc->pulses--; }
+        if((desc->pulse==0)||(desc->pulse==desc->period)||(desc->pulses==0)){
+          desc->next_tick = KTIME_MAX;
+        }else{
+          desc->next_tick=ktime_add_ns(
+            desc->next_tick,
+            (desc->value? desc->pulse : desc->period-desc->pulse)*1000
+          );
+        }
+      }
+
+      if((next_tick==0)||(desc->next_tick<next_tick && desc->next_tick < KTIME_MAX)){
+        next_tick = desc->next_tick;
+      }
+    }
+  }
+
+  return next_tick;
+}
+
 /* Store attribute values for PWMs */
 static ssize_t pwm_store(
   struct device *dev, struct device_attribute *attr, const char *buf, size_t size
 ){
   struct pwm_desc *desc = dev_get_drvdata(dev);
   ssize_t status;
+  ktime_t now;
+
   mutex_lock(&sysfs_lock);
   if(!test_bit(FLAG_SOFTPWM, &desc->flags)){
     status = -EIO;
   }else{
     unsigned long value;
-    status = strict_strtoul(buf, 0, &value);
+    status = kstrtoul(buf, 0, &value);
+
+    hrtimer_cancel(&hr_timer);
+
     if(status==0){
       if(strcmp(attr->attr.name, "pulse")==0){
         if(value<=desc->period){ desc->pulse = (unsigned int)value; }
@@ -101,8 +145,13 @@ static ssize_t pwm_store(
       }else if(strcmp(attr->attr.name, "pulses")==0){
         desc->pulses = (unsigned int)value;
       }
-      desc->next_tick = ktime_get();
-      printk(KERN_INFO "Starting timer (%s).\n", attr->attr.name);
+
+      now = ktime_get();
+
+      if (desc->next_tick < now || desc->next_tick == KTIME_MAX) {
+        desc->next_tick = now;
+      }
+
       hrtimer_start(&hr_timer, ktime_set(0,1), HRTIMER_MODE_REL);
     }
   }
@@ -133,7 +182,7 @@ static ssize_t export_store(struct class *class, struct class_attribute *attr, c
   long gpio;
   int  status;
 
-  status = strict_strtol(buf, 0, &gpio);
+  status = kstrtoul(buf, 0, &gpio);
   if(status<0){ goto done; }
 
   status = gpio_request(gpio, "soft_pwm");
@@ -162,7 +211,7 @@ static ssize_t unexport_store(struct class *class, struct class_attribute *attr,
   long gpio;
   int  status;
 
-  status = strict_strtol(buf, 0, &gpio);
+  status = kstrtoul(buf, 0, &gpio);
   if(status<0){ goto done; }
 
   status = -EINVAL;
@@ -178,15 +227,21 @@ done:
 }
 
 /* Sysfs definitions for soft_pwm class */
-static struct class_attribute soft_pwm_class_attrs[] = {
-   __ATTR(export,   0200, NULL, export_store),
-   __ATTR(unexport, 0200, NULL, unexport_store),
-   __ATTR_NULL,
+static CLASS_ATTR_WO(export);
+static CLASS_ATTR_WO(unexport);
+
+static struct attribute *soft_pwm_class_attrs[] = {
+	&class_attr_export.attr,
+	&class_attr_unexport.attr,
+	NULL,
 };
+
+ATTRIBUTE_GROUPS(soft_pwm_class);
+
 static struct class soft_pwm_class = {
   .name =        "soft_pwm",
   .owner =       THIS_MODULE,
-  .class_attrs = soft_pwm_class_attrs,
+  .class_groups = soft_pwm_class_groups,
 };
 
 /* Setup the sysfs directory for a claimed PWM device */
@@ -200,6 +255,7 @@ int pwm_export(unsigned gpio){
   desc = &pwm_table[gpio];
   desc->value  = 0;
   desc->pulses = -1;
+  desc->next_tick = 0;
   dev = device_create(&soft_pwm_class, NULL, MKDEV(0, 0), desc, "pwm%d", gpio);
   if(dev){
     status = sysfs_create_group(&dev->kobj, &soft_pwm_dev_attr_group);
@@ -219,7 +275,7 @@ int pwm_export(unsigned gpio){
 }
 
 /* Used by pwm_unexport below to find the device which should be freed */
-static int match_export(struct device *dev, void *data){
+static int match_export(struct device *dev, const void *data){
   return dev_get_drvdata(dev) == data;
 }
 
@@ -252,41 +308,10 @@ int pwm_unexport(unsigned gpio){
  * say, at the earliest PWM signal toggling time) in order to
  * maintain the pressure on system latency as low as possible
  */
-enum hrtimer_restart soft_pwm_hrtimer_callback(struct hrtimer *timer){
-  unsigned gpio;
-  struct pwm_desc *desc;
-  ktime_t now = ktime_get();
-  ktime_t next_tick = ktime_set(0,0);
-
-  now = ktime_get();
-  for(gpio=0;gpio<ARCH_NR_GPIOS;gpio++){
-    desc = &pwm_table[gpio];
-    if(
-      test_bit(FLAG_SOFTPWM,&desc->flags) &&
-      (desc->period>0) &&
-      (desc->pulse<=desc->period) &&
-      (desc->pulses!=0)
-    ){
-      if(desc->next_tick.tv64<=now.tv64){
-        desc->value = 1-desc->value;
-        __gpio_set_value(gpio,desc->value);
-        desc->counter++;
-        if(desc->pulses>0){ desc->pulses--; }
-        if((desc->pulse==0)||(desc->pulse==desc->period)||(desc->pulses==0)){
-          desc->next_tick.tv64 = KTIME_MAX;
-        }else{
-          desc->next_tick=ktime_add_ns(
-            desc->next_tick,
-            (desc->value? desc->pulse : desc->period-desc->pulse)*1000
-          );
-        }
-      }
-      if((next_tick.tv64==0)||(desc->next_tick.tv64<next_tick.tv64)){
-        next_tick.tv64 = desc->next_tick.tv64;
-      }
-    }
-  }
-  if(next_tick.tv64>0){
+enum hrtimer_restart soft_pwm_hrtimer_callback(struct hrtimer *timer) {
+  ktime_t next_tick = tick();
+  
+  if(next_tick > 0){
     hrtimer_start(&hr_timer, next_tick, HRTIMER_MODE_ABS);
   }else{
     printk(KERN_INFO "Stopping timer.\n");
@@ -296,13 +321,8 @@ enum hrtimer_restart soft_pwm_hrtimer_callback(struct hrtimer *timer){
 
 /* module initialization: init the hr-timer and register a driver class */
 static int __init soft_pwm_init(void){
-  struct timespec tp;
-
   int status;
-  printk(KERN_INFO "SoftPWM v0.1 initializing.\n");
-
-  hrtimer_get_res(CLOCK_MONOTONIC, &tp);
-  printk(KERN_INFO "Clock resolution is %ldns\n", tp.tv_nsec);
+  printk(KERN_INFO "SoftPWM v0.2 initializing.\n");
 
   hrtimer_init(&hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
   hr_timer.function = &soft_pwm_hrtimer_callback;
