@@ -1,6 +1,6 @@
 obj-m       := soft_pwm.o
 
-KVERSION= 5.15.93-sunxi
+KVERSION=$(shell uname -r)
 
 all:
 	make -C /lib/modules/$(KVERSION)/build M=$(PWD) modules

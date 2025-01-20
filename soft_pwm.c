@@ -21,6 +21,10 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Antonio Galea");
 MODULE_DESCRIPTION("Driver for kernel-generated PWM signals");
 
+#ifndef ARCH_NR_GPIOS
+#define ARCH_NR_GPIOS 565
+#endif
+
 static struct hrtimer hr_timer;
 
 /* pwm_desc
@@ -98,7 +102,7 @@ ktime_t tick( void ) {
     ){
       if(desc->next_tick<=now){
         desc->value = 1-desc->value;
-        __gpio_set_value(gpio,desc->value);
+        gpio_set_value(gpio,desc->value);
         desc->counter++;
         if(desc->pulses>0){ desc->pulses--; }
         if((desc->pulse==0)||(desc->pulse==desc->period)||(desc->pulses==0)){
@@ -178,9 +182,12 @@ static const struct attribute_group soft_pwm_dev_attr_group = {
 /* Export a GPIO pin to sysfs, and claim it for PWM usage.
  * See the equivalent function in drivers/gpio/gpiolib.c
  */
-static ssize_t export_store(struct class *class, struct class_attribute *attr, const char *buf, size_t len){
+static ssize_t export_store(const struct class *class,
+                            const struct class_attribute *attr,
+                            const char *buf,
+                            size_t len) {
   long gpio;
-  int  status;
+  int status;
 
   status = kstrtoul(buf, 0, &gpio);
   if(status<0){ goto done; }
@@ -207,7 +214,10 @@ done:
 /* Unexport a PWM GPIO pin from sysfs, and unreclaim it.
  * See the equivalent function in drivers/gpio/gpiolib.c
  */
-static ssize_t unexport_store(struct class *class, struct class_attribute *attr, const char *buf, size_t len){
+static ssize_t unexport_store(const struct class *class,
+                              const struct class_attribute *attr,
+                              const char *buf,
+                              size_t len){
   long gpio;
   int  status;
 
@@ -240,7 +250,6 @@ ATTRIBUTE_GROUPS(soft_pwm_class);
 
 static struct class soft_pwm_class = {
   .name =        "soft_pwm",
-  .owner =       THIS_MODULE,
   .class_groups = soft_pwm_class_groups,
 };
 
@@ -322,7 +331,7 @@ enum hrtimer_restart soft_pwm_hrtimer_callback(struct hrtimer *timer) {
 /* module initialization: init the hr-timer and register a driver class */
 static int __init soft_pwm_init(void){
   int status;
-  printk(KERN_INFO "SoftPWM v0.2 initializing.\n");
+  printk(KERN_INFO "SoftPWM v0.3 initializing.\n");
 
   hrtimer_init(&hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
   hr_timer.function = &soft_pwm_hrtimer_callback;
@@ -349,7 +358,7 @@ static void __exit soft_pwm_exit(void){
     struct pwm_desc *desc;
     desc = &pwm_table[gpio];
     if(test_bit(FLAG_SOFTPWM,&desc->flags)){
-      __gpio_set_value(gpio,0);
+      gpio_set_value(gpio,0);
       status = pwm_unexport(gpio);
       if(status==0){ gpio_free(gpio); }
     }
